@@ -1,0 +1,63 @@
+#ncbi_sra environment
+conda create -n ncbi
+conda install -c bioconda sra-tools
+conda activate ncbi
+cd /path/to/ncbi_download/
+fastq-dump --split-files --gzip SRRxxxxxxx 
+
+
+#########################################
+#install cellranger (see 10xgenomics website)
+#cellranger slurm script on expanse cluster
+
+#!/bin/bash
+#SBATCH --job-name="cellranger"
+#SBATCH --output="%x.%j.%N.out"
+#SBATCH --partition=shared
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
+#SBATCH --account=acb100
+#SBATCH --export=ALL
+#SBATCH -t 3:00:00
+#SBATCH --constraint="lustre"  #if lustre file system is used
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=xxxxx@xxx.edu           #change e-mail address
+module purge 
+module load cpu
+module load slurm
+module load gcc
+module load anaconda3
+eval "$(conda shell.bash hook)"
+conda activate
+export PATH=/where/cellranger/is/installed/cellranger-7.1.0:$PATH
+cd /where/you/want/to/export/cellranger/output/
+cellranger count --id=sample_name_for_SRRxxxxxxx \
+  --fastqs=/path/to/ncbi_download/fastq_files/ \
+  --sample=SRRxxxxxxx \
+  --transcriptome=/where/cellranger/is/installed/refdata-gex-GRCh38-2020-A
+  
+#####################################################
+
+#scRNA-seq analysis 
+conda create -n scRNA-seq
+conda install - c bioconda samtools freebayes parallel meson vcftools libvcflib-tools gatk4
+conda activate RNAseq_pipe
+
+#directories
+ref="/.../.../supporting_files/hg38/hg38.fa"
+ref_fai="/.../.../supporting_files/hg38/hg38.fa.fai"
+known_sites="/.../.../supporting_files/hg38/Homo_sapiens_assembly38.dbsnp138.vcf"
+aligned_reads="/.../.../temp_project/aligned_reads/"
+reads="/.../.../SRR.bam/"  # The bam file from cellranger output
+#Filter cellranger-processed bam in a way that reads with any of the following patterns be removed: read qality lower than 20, being unmapped segment, being secondary alignment,\
+#being PCR or optical duplicate, or being supplementary alignment; keep SNPs only
+samtools view -iXu -b -q 20 -F 3844 ${reads}/SRR.bam > ${aligned_reads}/SRR_filtered.bam
+samtools markdup ${aligned_reads}/SRR_filtered.bam ${aligned_reads}/CG21_filtered1.bam
+samtools sort ${aligned_reads}/SRR_filtered1.bam -o ${aligned_reads}/SRR_filtered2.bam
+samtools index ${aligned_reads}/SRR_filtered2.bam
+#assming we do not know how many individual samples in the pool
+feebayes -iXu -f ${ref} -F 0.20 --pooled-continuous ${aligned_reads}/SRR_filtered2.bam > ${aligned_reads}/ukngrp_SRR_snv.vcf
+
+#to be continued
