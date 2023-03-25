@@ -1,9 +1,18 @@
 #ncbi_sra environment
 conda create -n ncbi
-conda install -c bioconda sra-tools
 conda activate ncbi
+conda install -c bioconda sra-tools
+
+
 cd /path/to/ncbi_download/
 fastq-dump --split-files --gzip SRRxxxxxxx 
+
+# OR
+vdb-config --prefetch-to-cwd
+prefetch SRRxxxxxx --max-size u
+fastq-dump SRRxxxxxx --split-files
+gzip  #(make fastq.gz files)
+#[Sample_Name]_S1_L00[Lane Number]_[Read_Type, R1,R2,I1]_001.fastq.gz    #the smallest size is the index file I1, the other 2 are R1 and R2
 
 
 #########################################
@@ -23,7 +32,7 @@ fastq-dump --split-files --gzip SRRxxxxxxx
 #SBATCH -t 3:00:00
 #SBATCH --constraint="lustre"  #if lustre file system is used
 #SBATCH --mail-type=ALL
-#SBATCH --mail-user=xxxxx@xxx.edu           #change e-mail address
+#SBATCH --mail-user=xxxxx@xxxx.edu           #send e-mail when slurm job begains, fails, stops.
 module purge 
 module load cpu
 module load slurm
@@ -49,15 +58,55 @@ conda activate RNAseq_pipe
 ref="/.../.../supporting_files/hg38/hg38.fa"
 ref_fai="/.../.../supporting_files/hg38/hg38.fa.fai"
 known_sites="/.../.../supporting_files/hg38/Homo_sapiens_assembly38.dbsnp138.vcf"
-aligned_reads="/.../.../temp_project/aligned_reads/"
+aligned_reads="/.../dennyli/temp_project/aligned_reads/"
 reads="/.../.../SRR.bam/"  # The bam file from cellranger output
+results="/expanse/lustre/scratch/dennyli/temp_project/results/"
 #Filter cellranger-processed bam in a way that reads with any of the following patterns be removed: read qality lower than 20, being unmapped segment, being secondary alignment,\
 #being PCR or optical duplicate, or being supplementary alignment; keep SNPs only
-samtools view -iXu -b -q 20 -F 3844 ${reads}/SRR.bam > ${aligned_reads}/SRR_filtered.bam
-samtools markdup ${aligned_reads}/SRR_filtered.bam ${aligned_reads}/CG21_filtered1.bam
-samtools sort ${aligned_reads}/SRR_filtered1.bam -o ${aligned_reads}/SRR_filtered2.bam
-samtools index ${aligned_reads}/SRR_filtered2.bam
-#assming we do not know how many individual samples in the pool
-feebayes -iXu -f ${ref} -F 0.20 --pooled-continuous ${aligned_reads}/SRR_filtered2.bam > ${aligned_reads}/ukngrp_SRR_snv.vcf
+#samtools view -iXu -b -q 20 -F 3844 ${reads}/SRR.bam > ${aligned_reads}/SRR_filtered.bam
+#merge 4 bam files from 4 subjects and name it a new big bam file CG21
 
-#to be continued
+samtools merge CG21.bam infile1.bam infile2.bam infile3.bam infile4.bam
+
+samtools view -q 20 ${reads}/CG21.bam > ${aligned_reads}/CG21_filtered.bam
+#mark bam file for duplication, get it sorted and indexed in samtools
+samtools markdup ${aligned_reads}/CG21_filtered.bam ${aligned_reads}/CG21_filtered1.bam
+#samtools rmdup ${aligned_reads}/CG21_filtered.bam ${aligned_reads}/CG21_filtered1.bam         #check the samtools version
+samtools sort ${aligned_reads}/CG21_filtered1.bam -o ${aligned_reads}/CG21_filtered2.bam
+samtools index ${aligned_reads}/CG21_filtered2.bam
+
+#running freebayes in parallel (12 cores) and get a raw vcf file; it is a long run, more than 24 hours
+freebayes-parallel <(fasta_generate_regions.py ${ref_fai} 100000) 12 -f ${ref} ${aligned_reads}/CG21_filtered2.bam > ${aligned_reads}/para_CG21_snv.vcf
+
+#more filtration criteria can be added
+gatk VariantFiltration \
+   -R ${ref} \
+   -V ${aligned_reads}/para_CG21_snv.vcf \
+   -O ${results}/filtered_CG21_snv.vcf \
+    --genotype-filter-expression "DP < 10" --genotype-filter-name "DP_filter" \ 
+    --genotype-filter-expression "GQ < 10" --genotype-filter-name "GQ_filter"
+
+#remove filtered variants
+gatk SelectVariants \
+   --exclude-filtered -V ${results}/filtered_CG21_snv.vcf \
+   -O ${results}/clean_CG21_snv.vcf
+   
+#only keep SNPs
+gatk SelectVariants \
+   --select-type-to-include SNP -V ${results}/clean_CG21_snv.vcf \
+   -O ${results}/CG21_snp.vcf
+
+#run demuxlet   
+export PATH=/expanse/lustre/projects/where/demuxlet/is/installed/:$PATH
+demuxlet --sam /expanse/lustre/scratch/dennyli/temp_project/aligned_reads/CG21_filtered2.bam \
+         --vcf /expanse/lustre/scratch/dennyli/temp_project/results/CG21_snp.vcf \
+         --field GT --out /expanse/lustre/scratch/dennyli/temp_project/demuxlet_out/
+
+
+
+#assming we do not know how many individual samples in the pool, generate frequency-based calls for all variants passing the input threshold.
+
+freebayes -iXu -f ${ref} -F 0.20 --pooled-continuous ${aligned_reads}/CG21_filtered2.bam > ${aligned_reads}/ukngrp_CG21_snv.vcf
+# this is running too long......
+
+
